@@ -75,6 +75,8 @@ PATH_PODCAST: Final[str] = "/api/v3/podcast/podcasts/{podcast_id}"
 PATH_PODCAST_EPISODES: Final[str] = "/api/v3/podcast/podcasts/{podcast_id}/episodes"
 PATH_PODCAST_EPISODE: Final[str] = "/api/v3/podcast/episodes/{episode_id}"
 PATH_SEARCH: Final[str] = "/api/v3/search/all"
+PATH_RECS_ARTISTS: Final[str] = "/api/v3/recs/artist/genre"
+PATH_RECS_LIVE: Final[str] = "/api/v3/recs/live-station"
 
 # -- Streaming --
 
@@ -153,6 +155,7 @@ CACHE_CATEGORY_STATIONS: Final[int] = 0
 CACHE_CATEGORY_PODCASTS: Final[int] = 1
 CACHE_CATEGORY_CATALOG: Final[int] = 2
 CACHE_CATEGORY_SEARCH: Final[int] = 3
+CACHE_CATEGORY_RECS: Final[int] = 4
 
 CACHE_TTL_STATION: Final[int] = 3600 * 6
 # Markets, genres and podcast categories change a few times a year at most.
@@ -160,6 +163,13 @@ CACHE_TTL_CATALOG: Final[int] = 3600 * 24 * 7
 CACHE_TTL_PODCAST: Final[int] = 3600 * 24
 CACHE_TTL_EPISODES: Final[int] = 3600
 CACHE_TTL_SEARCH: Final[int] = 3600
+# The Discover page asks for these on every visit; iHeart's own site refreshes them half hourly.
+CACHE_TTL_RECS: Final[int] = 3600
+
+# -- Recommendation rows --
+
+REC_ARTIST_RADIO: Final[str] = "artist_radio_for_you"
+REC_LIVE_RADIO: Final[str] = "live_radio_for_you"
 
 # -- Browse paths --
 
