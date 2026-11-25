@@ -2358,16 +2358,17 @@ and mute of both go to their own protocol again.
 
 ## Volume
 
-The level and mute of a player are its own. A volume or mute command goes to the output that
-renders, else to the own protocol, and an output that takes over gets the player's level first.
-The examples use the Kitchen speaker with its own protocol at level 30 and its AirPlay receiver at
-level 80.
+The level and mute of a player are its own. Without a picked control, a volume or mute command
+goes to the own protocol (VOLUME-8). With auto picked, it goes to the output that renders, else
+to the own protocol, and an output that takes over gets the player's level first. The examples
+use the Kitchen speaker with its own protocol at level 30 and its AirPlay receiver at level 80.
 
 ### VOLUME-1 · An output that takes over gets the player's level before it plays
 
-The user prefers the AirPlay receiver as Kitchen's output and plays. The receiver gets level 30
-once, before the media, and the player never shows 80. When Kitchen and Hall group over AirPlay,
-each receiver gets the level and mute of its own player.
+The user picks auto as Kitchen's volume control, prefers the AirPlay receiver as its output and
+plays. The receiver gets level 30 once, before the media, and the player never shows 80. When
+Kitchen and Hall, both on auto, group over AirPlay, each receiver gets the level and mute of its
+own player.
 
 - End-to-end: **possible with** a host that runs a native player and an AirPlay receiver at
   different levels, such as Squeezelite and shairport-sync.
@@ -2377,9 +2378,10 @@ each receiver gets the level and mute of its own player.
 
 ### VOLUME-2 · A volume command goes to the output that renders, and only it reports back
 
-While Kitchen plays through its AirPlay receiver, a volume command goes to the receiver, not to
-the own protocol. A level the idle own protocol reports does not move the player's level; one the
-receiver reports does. While nothing else renders, a volume command goes to the own protocol.
+With auto picked, while Kitchen plays through its AirPlay receiver, a volume command goes to the
+receiver, not to the own protocol. A level the idle own protocol reports does not move the
+player's level; one the receiver reports does. While nothing else renders, a volume command goes
+to the own protocol.
 
 - End-to-end: **possible with** the setup of VOLUME-1.
 - Proven by:
@@ -2445,14 +2447,29 @@ has no level of its own; only its members count.
 Lounge leads Study over AirPlay and the user stops the group. Lounge's AirPlay receiver stays its
 output for the group, but plays nothing, and an AirPlay receiver only takes a volume command while
 it streams. A volume or mute command goes to Lounge's own protocol, and the receiver gets none.
-The user turns Study down and mutes it meanwhile, which reaches Study's own protocol; when the
-group plays again, Study's receiver gets that level and mute before the music starts.
+The user turns Study down and mutes it meanwhile, which reaches Study's own protocol; with auto
+picked for Study, its receiver gets that level and mute before the group plays again.
 
 - End-to-end: **possible with** two virtual players of different kinds that each also run an
   AirPlay receiver on their host.
 - Proven by:
   - `test_outputs.py::test_a_stopped_leader_takes_volume_on_its_own_protocol_while_it_keeps_its_group`
   - `test_outputs.py::test_a_member_plays_again_at_the_level_it_got_while_its_group_was_stopped`
+
+### VOLUME-8 · Without a picked control the own protocol keeps volume and mute
+
+Nothing is picked as Kitchen's volume or mute control, which the settings show as native. Kitchen
+plays through its AirPlay receiver: a volume command goes to the own protocol, and the receiver
+gets no level, neither before the media nor while it plays. Auto stays selectable next to native.
+A device whose own volume only scales its own stream, such as a snapclient, leaves an output that
+takes over its level, as with auto.
+
+- End-to-end: **possible with** the setup of VOLUME-1, without picking auto.
+- Proven by:
+  - `tests/controllers/players/test_routing.py::test_native_keeps_the_volume_by_default_while_an_audio_protocol_plays`
+  - `tests/models/test_player_controls.py::TestIdleActiveOutput::test_nothing_stored_keeps_the_control_native_while_an_output_plays`
+  - `tests/controllers/config/test_player_control_entries.py::test_native_is_the_default_and_auto_selectable_next_to_it`
+  - `tests/providers/snapcast/test_player_volume_routing.py::TestSnapCastVolumeFeatureExposure::test_volume_control_for_output_is_that_output_before_it_is_marked_active`
 
 ## A pause, a stop and the end of a queue
 

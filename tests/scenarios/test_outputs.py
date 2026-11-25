@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import IdentifierType, PlayerFeature
 
+from music_assistant.constants import PLAYER_CONTROL_PROTOCOL
+
 from .harness import DEFAULT_FEATURES, FakeProtocol, Scenario
 
 if TYPE_CHECKING:
@@ -137,11 +139,14 @@ async def test_a_member_plays_again_at_the_level_it_got_while_its_group_was_stop
     """
     A member whose level and mute changed while its group was stopped plays again at them.
 
-    Its AirPlay receiver stayed its output for the group, and the level and mute went to its
-    own protocol meanwhile. The receiver gets them before the group plays again: an AirPlay
-    receiver sends the level it holds when its stream starts.
+    With auto picked, its AirPlay receiver stayed its output for the group, and the level and
+    mute went to its own protocol meanwhile. The receiver gets them before the group plays
+    again: an AirPlay receiver sends the level it holds when its stream starts.
     """
     _, _, lounge_id, study_id = await _stopped_airplay_group(scenario)
+    await scenario.configure_player(
+        study_id, volume_control=PLAYER_CONTROL_PROTOCOL, mute_control=PLAYER_CONTROL_PROTOCOL
+    )
     study, study_airplay = scenario.protocol("wiim_study"), scenario.protocol("airplay_study")
     study.commands.clear()
     await scenario.mass.players.cmd_volume_set(study_id, 20)

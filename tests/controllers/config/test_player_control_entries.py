@@ -140,20 +140,19 @@ async def test_default_is_never_a_disabled_option(
         (CONF_MUTE_CONTROL, PlayerFeature.VOLUME_MUTE),
     ],
 )
-async def test_auto_is_the_default_next_to_a_native_control(
+async def test_native_is_the_default_and_auto_selectable_next_to_it(
     mass_minimal: MusicAssistant, conf_key: str, feature: PlayerFeature
 ) -> None:
-    """With an audio protocol that can take the control, the default shows what applies: auto."""
+    """With an audio protocol that can take the control, auto is offered after native."""
     entry = _entries_by_key(mass_minimal, {feature}, {feature})[conf_key]
 
-    assert entry.default_value == PLAYER_CONTROL_PROTOCOL
+    assert entry.default_value == PLAYER_CONTROL_NATIVE
     assert [option.value for option in entry.options][:2] == [
-        PLAYER_CONTROL_PROTOCOL,
         PLAYER_CONTROL_NATIVE,
+        PLAYER_CONTROL_PROTOCOL,
     ]
-    # native stays selectable, and now differs from the default, so a save stores it
-    native = next(option for option in entry.options if option.value == PLAYER_CONTROL_NATIVE)
-    assert native.disabled is False
+    auto = next(option for option in entry.options if option.value == PLAYER_CONTROL_PROTOCOL)
+    assert auto.disabled is False
 
 
 async def test_fake_mute_offered_when_volume_provided_by_protocol_player(

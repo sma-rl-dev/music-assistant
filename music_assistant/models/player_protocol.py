@@ -135,6 +135,7 @@ class PlayerProtocol(ABC):
     _attr_current_media: PlayerMedia | None = None
     _attr_needs_poll: bool = False
     _attr_poll_interval: int = 30
+    _attr_own_volume_covers_other_outputs: bool = True
     _attr_hidden_by_default: bool = False
     _attr_private: bool = False
     _attr_expose_to_ha_by_default: bool = True
@@ -294,6 +295,16 @@ class PlayerProtocol(ABC):
         This should return the interval in seconds.
         """
         return self._attr_poll_interval
+
+    @property
+    def own_volume_covers_other_outputs(self) -> bool:
+        """
+        Return if the volume of this own protocol also sets what the player's other outputs play.
+
+        True for a device with one volume (a speaker that also takes AirPlay); False when the
+        own volume is a gain stage of its own stream only.
+        """
+        return self._attr_own_volume_covers_other_outputs
 
     @property
     def hidden_by_default(self) -> bool:

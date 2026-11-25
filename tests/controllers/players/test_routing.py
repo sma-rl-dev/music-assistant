@@ -15,7 +15,11 @@ from music_assistant_models.enums import (
 )
 from music_assistant_models.media_items import AudioFormat
 
-from music_assistant.constants import CONF_OUTPUT_CHANNELS, CONF_VOLUME_CONTROL
+from music_assistant.constants import (
+    CONF_OUTPUT_CHANNELS,
+    CONF_VOLUME_CONTROL,
+    PLAYER_CONTROL_PROTOCOL,
+)
 from tests.common import grouping_player_controller
 from tests.scenarios.harness import DEFAULT_FEATURES, FakeProtocol, Scenario
 
@@ -88,9 +92,13 @@ async def _bridge_on_airplay(scenario: Scenario, *, with_native: bool) -> Player
 async def test_audio_protocol_that_takes_over_gets_the_level_of_the_player_first(
     scenario: Scenario,
 ) -> None:
-    """The output that starts to render starts at the level of the player, before the audio."""
+    """With auto picked, the output that starts to render starts at the level of the player."""
     player_id, native, audio = await _native_and_airplay(scenario, volume_level=30)
-    await scenario.configure_player(player_id, preferred_output_protocol="ap_kitchen")
+    await scenario.configure_player(
+        player_id,
+        preferred_output_protocol="ap_kitchen",
+        volume_control=PLAYER_CONTROL_PROTOCOL,
+    )
     published: list[Any] = []
     scenario.mass.players.subscribe_player_state_update(
         lambda player, changed: (
@@ -119,7 +127,7 @@ async def test_audio_protocol_that_takes_over_gets_the_level_of_the_player_first
 async def test_players_grouped_through_an_audio_protocol_hand_it_their_level_and_mute(
     scenario: Scenario,
 ) -> None:
-    """The protocol that carries the audio of a group starts at the level and mute of each player."""
+    """With auto picked, the protocol that carries a group starts at each player's level and mute."""
     sonos = await scenario.add_provider("sonos")
     airplay = await scenario.add_provider("airplay")
     airplay_features = {*DEFAULT_FEATURES, PlayerFeature.SET_MEMBERS}
@@ -152,6 +160,10 @@ async def test_players_grouped_through_an_audio_protocol_hand_it_their_level_and
     kitchen_native, kitchen_airplay, hall_native, hall_airplay = protocols
     kitchen_id = scenario.single_player(kitchen_native, kitchen_airplay).player_id
     hall_id = scenario.single_player(hall_native, hall_airplay).player_id
+    for player_id in (kitchen_id, hall_id):
+        await scenario.configure_player(
+            player_id, volume_control=PLAYER_CONTROL_PROTOCOL, mute_control=PLAYER_CONTROL_PROTOCOL
+        )
 
     await scenario.mass.players.cmd_set_members(kitchen_id, player_ids_to_add=[hall_id])
     await scenario.idle()
@@ -169,9 +181,13 @@ async def test_players_grouped_through_an_audio_protocol_hand_it_their_level_and
 async def test_volume_goes_to_the_output_that_renders_and_only_it_reports_back(
     scenario: Scenario,
 ) -> None:
-    """While an audio protocol plays it owns the volume: commands go there, feedback from there."""
+    """With auto picked, an audio protocol that plays owns the volume, commands and feedback."""
     player_id, native, audio = await _native_and_airplay(scenario, volume_level=30)
-    await scenario.configure_player(player_id, preferred_output_protocol="ap_kitchen")
+    await scenario.configure_player(
+        player_id,
+        preferred_output_protocol="ap_kitchen",
+        volume_control=PLAYER_CONTROL_PROTOCOL,
+    )
     await scenario.play(player_id)
 
     await scenario.mass.players.cmd_volume_set(player_id, 40)
@@ -192,6 +208,25 @@ async def test_volume_goes_to_the_output_that_renders_and_only_it_reports_back(
     state = scenario.player(player_id)
     assert state is not None
     assert state.volume_level == 45
+
+
+async def test_native_keeps_the_volume_by_default_while_an_audio_protocol_plays(
+    scenario: Scenario,
+) -> None:
+    """Without a stored control the native protocol keeps the volume; the output gets none."""
+    player_id, native, audio = await _native_and_airplay(scenario, volume_level=30)
+    await scenario.configure_player(player_id, preferred_output_protocol="ap_kitchen")
+    await scenario.play(player_id)
+
+    await scenario.mass.players.cmd_volume_set(player_id, 40)
+    await scenario.idle()
+
+    assert "play_media" in _names(audio)
+    assert "volume_set" not in _names(audio)
+    assert native.commands[-1] == ("volume_set", 40)
+    state = scenario.player(player_id)
+    assert state is not None
+    assert state.volume_level == 40
 
 
 async def test_native_protocol_owns_the_volume_while_nothing_else_renders(

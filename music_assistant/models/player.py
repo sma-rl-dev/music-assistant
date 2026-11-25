@@ -2227,9 +2227,10 @@ class Player:
         """
         Resolve the control a volume or mute command goes to right now.
 
-        Without a selection in the config that is the active output while it plays or is
-        paused, else the native protocol while it can be reached, else the active output,
-        else any available protocol with the feature.
+        Without a selection in the config that is the native protocol while it can be
+        reached. With auto picked, or without a native control: the active output while it
+        plays or is paused, else the native protocol while it can be reached, else the
+        active output, else any available protocol with the feature.
 
         :param feature: The feature the control has to support.
         :param conf_key: Config key holding the control selection.
@@ -2245,7 +2246,10 @@ class Player:
                 return protocol.protocol_id
             if _control := self.mass.players.get_player_control(str(conf)):
                 return _control.id
-        # handle auto-select logic if not explicitly set in config
+        # nothing stored: the own control, the default of the setting; auto only when picked
+        if not conf and self._own_controls(feature):
+            return PLAYER_CONTROL_NATIVE
+        # handle auto-select logic
         active_protocol = self._active_output_protocol
         if (
             active_protocol
@@ -2315,6 +2319,15 @@ class Player:
                 return protocol.protocol_id
             if _control := self.mass.players.get_player_control(str(conf)):
                 return _control.id
+        # nothing stored: the own control, the default of the setting, where it also sets
+        # what the named output plays; auto only when picked
+        if (
+            not conf
+            and self._own_controls(feature)
+            and (own := self._own_protocol) is not None
+            and own.own_volume_covers_other_outputs
+        ):
+            return PLAYER_CONTROL_NATIVE
         # Availability is not checked - the named output is the one about to render.
         if (
             output_protocol_id != "native"

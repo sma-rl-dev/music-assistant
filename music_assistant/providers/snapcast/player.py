@@ -62,6 +62,9 @@ class TrackedPlayerState(TypedDict, total=False):
 class SnapCastPlayer(PlayerProtocol):
     """SnapCastPlayer."""
 
+    # the snapclient volume only scales its own stream (support#6468)
+    _attr_own_volume_covers_other_outputs = False
+
     def __init__(
         self,
         provider: SnapCastProvider,

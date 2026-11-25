@@ -5,6 +5,7 @@ Covers the power_control, volume_control, and mute_control properties
 on the Player model, including:
 - Explicit config values (native, fake, none)
 - Explicit config pointing to a protocol or player control
+- Nothing stored: native while the own protocol can be reached, else auto-select
 - Auto-select: the active output protocol while it plays -> native -> the idle active output
   protocol -> any audio protocol -> none
 """
@@ -29,6 +30,7 @@ from music_assistant.constants import (
     CONF_POWER_CONTROL_CUTS_POWER,
     CONF_PREFERRED_OUTPUT_PROTOCOL,
     CONF_VOLUME_CONTROL,
+    PLAYER_CONTROL_PROTOCOL,
 )
 from music_assistant.models.player import Player
 from music_assistant.models.player_protocol import PlayerProtocol
@@ -66,6 +68,14 @@ def _make_config_side_effect(
         return overrides.get(key)
 
     return _side_effect
+
+
+def _pick_auto(mock_mass: MagicMock, feature: PlayerFeature) -> None:
+    """Store auto as the volume or mute control, the one that resolves the feature."""
+    conf_key = CONF_VOLUME_CONTROL if feature == PlayerFeature.VOLUME_SET else CONF_MUTE_CONTROL
+    mock_mass.config.get_player_value = MagicMock(
+        side_effect=_make_config_side_effect({conf_key: PLAYER_CONTROL_PROTOCOL})
+    )
 
 
 def _create_player(
@@ -688,12 +698,30 @@ class TestIdleActiveOutput:
     def test_rendering_output_keeps_the_control(
         self, mock_mass: MagicMock, feature: PlayerFeature, control: str, state: PlaybackState
     ) -> None:
-        """An active output that plays or is paused keeps the control from the own protocol."""
+        """With auto picked, an active output that plays or is paused takes the control."""
+        _pick_auto(mock_mass, feature)
         protocol = _create_protocol(mock_mass, "proto_a", {feature})
         protocol._attr_playback_state = state
         player = _create_player(mock_mass, features={feature})
         _link_protocols(player, [_make_protocol_link("proto_a", "airplay")], "proto_a")
         assert getattr(player, control) == "proto_a"
+
+    @_CONTROLS
+    def test_nothing_stored_keeps_the_control_native_while_an_output_plays(
+        self, mock_mass: MagicMock, feature: PlayerFeature, control: str
+    ) -> None:
+        """Without a stored control, the own protocol keeps it, also while another output plays."""
+        protocol = _create_protocol(mock_mass, "proto_a", {feature})
+        protocol._attr_playback_state = PlaybackState.PLAYING
+        player = _create_player(mock_mass, features={feature})
+        _link_protocols(player, [_make_protocol_link("proto_a", "airplay")], "proto_a")
+        for_output = (
+            player.volume_control_for_output
+            if feature == PlayerFeature.VOLUME_SET
+            else player.mute_control_for_output
+        )
+        assert getattr(player, control) == PLAYER_CONTROL_NATIVE
+        assert for_output("proto_a") == PLAYER_CONTROL_NATIVE
 
     @_CONTROLS
     def test_idle_output_keeps_the_control_without_own_control(
@@ -908,7 +936,8 @@ class TestControlForOutput:
     def test_output_with_the_feature_owns_it_on_a_native_player_too(
         self, mock_mass: MagicMock
     ) -> None:
-        """The protocol that renders the audio owns its level, also next to native volume."""
+        """With auto picked, the protocol that renders owns its level, also next to native volume."""
+        _pick_auto(mock_mass, PlayerFeature.VOLUME_SET)
         _create_protocol(mock_mass, "proto_a", {PlayerFeature.VOLUME_SET})
         _create_protocol(mock_mass, "proto_b", set())
         player = _create_player(mock_mass, features={PlayerFeature.VOLUME_SET})
