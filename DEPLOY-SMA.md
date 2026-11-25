@@ -124,6 +124,35 @@ the name-sorted library, so assert names/counts, never ids.
 - Reset + deploy + seed reproduces this state exactly (verified twice with
   byte-identical snapshots).
 
+## Verified evidence (2026-11-25, baseline 2.10.13)
+
+- **Source build**: cold build 3 m 16 s (dependency layer 114 s, image export
+  31 s), image `tester-env-music-assistant:dev` 3.36 GB
+  (`sha256:9adf845f96ba...`). Two builds over identical source produced the same
+  image ID. A one-line source edit rebuilds in 6.9 s (31 s end to end including
+  restart); unchanged source rebuilds from cache in ~1 s.
+- **Deploy**: fresh `/data` answers 302 (`/setup`) and `POST /api` 503 until an
+  admin exists; `deploy` posts `/setup` (admin / admin12345), calls
+  `config/onboard_complete`, pins `config/core/save` `webserver.base_url`, and
+  `/info` then reports `server_version: 2.10.13`, `onboard_done: true`,
+  `status: running`. Redeploys over preserved data take the login path.
+- **Reset**: `./tester-env reset` removed the container and
+  `.tester-env-data-<run>` in 1.4 s (image kept); reset + deploy created a new
+  `server_id`, re-ran first-run setup and reached `status: running` in 30 s.
+- **Seed**: two independent reset + deploy + seed cycles produced byte-identical
+  snapshots of artists, all 500 track names, the three playlist track lists,
+  favorites and users; re-running `seed` converges to the same state and
+  `./tester-env verify` passes. Cost: 17-21 s on a fresh deploy (library sync
+  ~12 s), ~5 s re-seed. Verification intentionally makes no task-progress
+  assertion (metadata lookups are throttled and cancelled by the seed).
+- **Browser smoke** (browser-checker): logged in as `admin` / `admin12345` at
+  `http://host.docker.internal:8095/` on a fresh reset + deploy and reached the
+  library overview instead of the setup/onboarding wizard; switching the UI
+  theme to Dark survived a page reload.
+- **Populated baseline** (browser-checker): the seeded library, playlists,
+  favorites, user list and server/metadata settings were confirmed in the UI
+  (see the assertions section above).
+
 ## Caveats
 
 - The UI bundle is the pinned `music-assistant-frontend 2.17.297.post4` wheel
