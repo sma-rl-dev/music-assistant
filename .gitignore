@@ -44,3 +44,6 @@ devenv.local.yaml
 
 # VS Code
 .vscode/launch.json
+
+# tester-env bind-mounted state (tester-env deploy)
+.tester-env-data*

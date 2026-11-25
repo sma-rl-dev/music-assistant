@@ -1,0 +1,12 @@
+.git
+.github
+tests
+**/__pycache__
+**/*.pyc
+.tester-env-data*
+# Tester-env tooling is not part of the app; excluding it keeps tooling edits
+# from invalidating the source COPY layer.
+tester-env
+tester-env-seed.py
+Dockerfile.tester-env
+DEPLOY-SMA.md

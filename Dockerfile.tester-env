@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1
+# Editable-source image for Music Assistant (tester-env).
+#
+# Mirrors the dependency half of upstream's Dockerfile, but skips the release
+# wheel: the checkout is copied to /app/source and served through PYTHONPATH.
+# Upstream's builder installs dist/music_assistant-${MASS_VERSION}-py3-none-any.whl
+# produced by GitHub Actions, which is not a source-build path.
+#
+# Layer order matters for the mutation workflow: requirements are installed
+# before the source copy, so a source edit only re-runs COPY + compileall.
+FROM ghcr.io/music-assistant/base:1.6.3
+
+ENV VIRTUAL_ENV=/app/venv \
+    PATH=/app/venv/bin:$PATH \
+    PYTHONPATH=/app/source \
+    PYTHONDONTWRITEBYTECODE=1 \
+    URLLIB3_NO_OVERRIDE=1
+
+# git: requirements pin aiolibdatachannel @ git+https.
+# gcc/g++: yappi and other providers may need a source build.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+RUN uv venv "$VIRTUAL_ENV"
+
+# Dependency layer: only invalidated when requirements_all.txt changes.
+COPY requirements_all.txt /tmp/requirements_all.txt
+RUN uv pip install \
+        --index-strategy unsafe-best-match \
+        --no-binary urllib3-future \
+        -r /tmp/requirements_all.txt
+
+# Reuse the base image's PyAV wheel (built against its system FFmpeg) and fail
+# loudly if requirements resolve a different av version.
+RUN required=$(python -c 'import importlib.metadata; print(importlib.metadata.version("av"))') \
+    && wheel=$(ls /usr/local/share/pyav-wheels/av*.whl | grep -oP 'av-\K[0-9.]+') \
+    && [ "$required" = "$wheel" ] \
+    && uv pip install --force-reinstall --no-deps /usr/local/share/pyav-wheels/av*.whl
+
+# Source layer: any source edit invalidates this (and only this) part.
+# pyproject.toml ships version 0.0.0; the release workflow rewrites it before
+# building, and the frontend gates features on server_version, so do the same.
+ARG MASS_VERSION=2.10.13
+COPY . /app/source
+RUN sed -i "s/^version = \"0.0.0\"/version = \"${MASS_VERSION}\"/" /app/source/pyproject.toml \
+    && uv pip install --no-deps -e /app/source \
+    && python -m compileall -q /app/source/music_assistant
+
+WORKDIR /app/source
+
+# Same jemalloc entrypoint as upstream (only imported modules pay the preload),
+# but running the module from source instead of the installed wheel.
+RUN printf '#!/bin/sh\n\
+for path in /usr/lib/*/libjemalloc.so.2; do\n\
+    [ -f "$path" ] && export LD_PRELOAD="$path" MALLOC_CONF="background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000" && break\n\
+done\n\
+exec python -m music_assistant "$@"\n' > /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+
+VOLUME [ "/data" ]
+EXPOSE 8095
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "--data-dir", "/data", "--cache-dir", "/data/.cache"]

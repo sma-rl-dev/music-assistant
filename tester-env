@@ -1,0 +1,416 @@
+#!/usr/bin/env bash
+# tester-env CLI for Music Assistant server 2.10.13
+# (61cbb98981aa53685fc026905f5caa762462680c, latest stable release tag).
+#
+# Builds the editable checkout into ghcr.io/music-assistant/base:1.6.3 (the
+# stable base pinned by the release workflow) instead of upstream's prebuilt
+# release wheel. Dependencies come from requirements_all.txt; the app itself is
+# served from /app/source through PYTHONPATH, so a source edit only invalidates
+# the source COPY layer.
+#
+# Ports/state:
+#   host port ${PORT:-8095} -> container 8095
+#   ${DATA_DIR} -> /data  (settings.json, library.db, auth DB, cache, logs)
+# Bind mount is deliberate: reset is a host-side directory removal and the data
+# dir holds everything the server persists (settings.json, library.db, auth DB).
+#
+# Deterministic credentials (created by deploy via the public setup endpoint):
+#   admin / admin12345   (ADMIN role, onboarding marked complete)
+#
+# All commands accept --run-id <id> and --port <port> because scripts/rl-env
+# invokes them that way. RUN_ID scopes containers/data dirs only; IMAGE_TAG
+# scopes the image (content-addressed by rl-env, never run-id based).
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+RUN_ID="${RUN_ID:-default}"
+PORT="${PORT:-8095}"
+IMAGE_NAME="${IMAGE_TAG:-tester-env-music-assistant:dev}"
+
+SUFFIX=""
+[ "${RUN_ID}" != "default" ] && SUFFIX="-${RUN_ID}"
+CONTAINER_NAME="tester-env-music-assistant${SUFFIX}"
+DATA_DIR_OVERRIDE="${DATA_DIR:-}"
+DATA_DIR="${DATA_DIR_OVERRIDE:-${SCRIPT_DIR}/.tester-env-data${SUFFIX}}"
+DOCKERFILE="${SCRIPT_DIR}/Dockerfile.tester-env"
+SEED_SCRIPT="${SCRIPT_DIR}/tester-env-seed.py"
+
+ADMIN_USER="${MASS_ADMIN_USER:-admin}"
+ADMIN_PASS="${MASS_ADMIN_PASS:-admin12345}"
+
+LOCAL_URL="http://127.0.0.1:${PORT}"
+# rl-env exports the origin the runner's browser uses; the webserver's base_url
+# must match it, otherwise absolute URLs (WS, passkey/oauth redirects) point at
+# localhost. Manual runs fall back to the local URL. Recomputed in main() after
+# --port/--run-id parsing, which is why the env value is captured separately.
+BASE_URL_ENV="${BASE_URL:-}"
+BASE_URL="${BASE_URL_ENV:-${TESTER_ENV_BROWSER_ORIGIN:-${LOCAL_URL}}}"
+LABELS=()
+
+refresh_labels() {
+  # Labels must match the run id rl-env will later use for cleanup, including
+  # when --run-id arrived as an argument rather than through the environment.
+  local label_run_id="${TESTER_ENV_RUN_ID:-${RUN_ID}}"
+  LABELS=(
+    --label "tester-env.project=${TESTER_ENV_PROJECT:-tester-env}"
+    --label "tester-env.app=music-assistant"
+    --label "tester-env.scenario=${TESTER_ENV_SCENARIO:-manual}"
+    --label "tester-env.run_id=${label_run_id}"
+  )
+}
+refresh_labels
+
+log() { printf '==> %s\n' "$*"; }
+die() { printf '==> ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_docker() {
+  command -v docker >/dev/null 2>&1 || die "docker is required"
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  command -v python3 >/dev/null 2>&1 || die "python3 is required"
+}
+
+container_exists() {
+  docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"
+}
+
+container_running() {
+  docker ps --filter "name=^/${CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"
+}
+
+require_running() {
+  container_running || die "container ${CONTAINER_NAME} is not running; run './tester-env deploy' first"
+}
+
+http_code_any() {
+  curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null || true
+}
+
+wait_ready() {
+  # First boot loads the whole provider set, so allow a generous window.
+  local deadline=$((SECONDS + 300))
+  log "waiting for Music Assistant on ${LOCAL_URL}"
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    local code
+    code=$(http_code_any "${LOCAL_URL}/")
+    if [ -n "${code}" ] && [ "${code}" != "000" ]; then
+      log "webserver is answering (HTTP ${code})"
+      return 0
+    fi
+    if ! container_running; then
+      docker logs --tail 80 "${CONTAINER_NAME}" 2>&1 || true
+      die "container ${CONTAINER_NAME} exited before it answered"
+    fi
+    sleep 2
+  done
+  docker logs --tail 120 "${CONTAINER_NAME}" 2>&1 || true
+  die "server did not answer within 300s"
+}
+
+json_field() {
+  # json_field <dotted.path> reads JSON on stdin and prints the value (empty on miss).
+  python3 -c '
+import json, sys
+try:
+    cur = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for key in sys.argv[1].split("."):
+    cur = cur.get(key) if isinstance(cur, dict) else None
+print("" if cur is None else cur)' "$1"
+}
+
+login_token() {
+  local resp
+  resp=$(curl -sS --max-time 30 -X POST -H 'Content-Type: application/json' \
+    --data "{\"provider_id\":\"builtin\",\"credentials\":{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}}" \
+    "${LOCAL_URL}/auth/login" 2>/dev/null || true)
+  printf '%s' "${resp}" | json_field token
+}
+
+api_post() {
+  # api_post <token> <command-json> -> prints body, exits nonzero on HTTP >= 400.
+  local token="$1" body="$2" resp code
+  resp=$(curl -sS --max-time 60 -X POST \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${token}" \
+    --data "${body}" \
+    -w $'\n%{http_code}' \
+    "${LOCAL_URL}/api" 2>&1) || true
+  code="${resp##*$'\n'}"
+  resp="${resp%$'\n'*}"
+  printf '%s' "${resp}"
+  case "${code}" in
+    2*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+wait_running() {
+  # The webserver answers while controllers are still starting (status
+  # "starting"); the frontend is only usable once the server reports running.
+  local deadline=$((SECONDS + 180)) status
+  log "waiting for server status 'running'"
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    status=$(curl -sS --max-time 5 "${LOCAL_URL}/info" 2>/dev/null | json_field status || true)
+    if [ "${status}" = "running" ]; then
+      log "server status: running"
+      return 0
+    fi
+    if ! container_running; then
+      docker logs --tail 80 "${CONTAINER_NAME}" 2>&1 || true
+      die "container ${CONTAINER_NAME} exited during startup"
+    fi
+    sleep 2
+  done
+  docker logs --tail 120 "${CONTAINER_NAME}" 2>&1 || true
+  die "server did not reach status 'running' within 180s (last status: ${status:-unknown})"
+}
+
+bootstrap_admin() {  # First run has no users: POST /api answers 503 until an admin exists and the
+  # public POST /setup (15-minute window per boot) creates the first ADMIN.
+  local code token resp
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST "${LOCAL_URL}/api" 2>/dev/null || true)
+
+  if [ "${code}" = "503" ]; then
+    log "server is in first-run setup mode; creating admin ${ADMIN_USER}"
+    resp=$(curl -sS --max-time 30 -X POST -H 'Content-Type: application/json' \
+      --data "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}" \
+      "${LOCAL_URL}/setup" 2>/dev/null || true)
+    token=$(printf '%s' "${resp}" | json_field token)
+    [ -n "${token}" ] || die "POST /setup did not return a token: ${resp}"
+  else
+    log "existing users found; logging in as ${ADMIN_USER}"
+    token=$(login_token)
+    [ -n "${token}" ] || die "login failed for ${ADMIN_USER}; reset the environment or inspect ./tester-env logs"
+  fi
+
+  # The frontend blocks on an onboarding wizard until this flag is set. Not
+  # available (400) once complete, which is expected on redeploy.
+  if resp=$(api_post "${token}" '{"message_id":"onboard","command":"config/onboard_complete"}'); then
+    log "onboarding marked complete"
+  else
+    log "onboarding already complete"
+  fi
+
+  # Pin the webserver base_url to the browser origin so absolute URLs in the
+  # API/UI point at the URL the runner actually uses.
+  if resp=$(api_post "${token}" "{\"message_id\":\"base-url\",\"command\":\"config/core/save\",\"args\":{\"domain\":\"webserver\",\"values\":{\"base_url\":\"${BASE_URL}\"}}}"); then
+    log "webserver base_url set to ${BASE_URL}"
+  else
+    log "WARNING: could not set webserver base_url (continuing): ${resp}"
+  fi
+
+  token=$(login_token)
+  [ -n "${token}" ] || die "login verification failed after setup"
+  log "login verified: ${ADMIN_USER}/${ADMIN_PASS} (token ${#token} chars)"
+}
+
+cmd_deploy() {
+  need_docker
+  log "preparing data directory ${DATA_DIR}"
+  mkdir -p "${DATA_DIR}"
+
+  log "building image ${IMAGE_NAME} from ${DOCKERFILE} (cold build installs ~100 pinned requirements, expect several minutes)"
+  # No run-scoped labels on the image: IMAGE_TAG is content-addressed and must
+  # produce the same image ID for identical source across parallel runs.
+  docker build -t "${IMAGE_NAME}" -f "${DOCKERFILE}" "${SCRIPT_DIR}"
+
+  if container_exists; then
+    log "replacing existing container ${CONTAINER_NAME}"
+    docker stop --time 15 "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    docker rm "${CONTAINER_NAME}" >/dev/null
+  fi
+
+  log "starting ${CONTAINER_NAME} on port ${PORT}"
+  # Run as the invoking uid/gid so /data stays host-owned and reset works
+  # without a privileged helper.
+  docker run -d --name "${CONTAINER_NAME}" "${LABELS[@]}" \
+    --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    -p "${PORT}:8095" \
+    -v "${DATA_DIR}:/data" \
+    "${IMAGE_NAME}" >/dev/null
+
+  wait_ready
+  bootstrap_admin
+  wait_running
+  log "deployment complete: ${LOCAL_URL}/"
+  log "credentials: ${ADMIN_USER}/${ADMIN_PASS} (admin)"
+  log "data dir: ${DATA_DIR} (delete via ./tester-env reset)"
+}
+
+cmd_seed() {
+  # Deterministic baseline (admin + onboarding) is created by deploy; the seed
+  # adds the upstream `test` music provider, a second non-admin account, three
+  # playlists and a fixed set of favorites through the same JSON-RPC API the UI
+  # uses. Safe to re-run: playlists are recreated and favorites re-applied.
+  require_running
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for the seed/verify script"
+  [ -f "${SEED_SCRIPT}" ] || die "${SEED_SCRIPT} is missing"
+  python3 "${SEED_SCRIPT}" seed "${LOCAL_URL}"
+  python3 "${SEED_SCRIPT}" verify "${LOCAL_URL}"
+}
+
+cmd_verify() {
+  require_running
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for the seed/verify script"
+  [ -f "${SEED_SCRIPT}" ] || die "${SEED_SCRIPT} is missing"
+  python3 "${SEED_SCRIPT}" verify "${LOCAL_URL}"
+}
+
+cmd_reset() {
+  need_docker
+  case "${DATA_DIR}" in
+    "${SCRIPT_DIR}"/*) ;;
+    *) die "refusing to delete DATA_DIR outside the app checkout: ${DATA_DIR} (unset DATA_DIR or point it inside ${SCRIPT_DIR})" ;;
+  esac
+  log "resetting environment"
+  if container_exists; then
+    docker stop --time 15 "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    docker rm "${CONTAINER_NAME}" >/dev/null
+  fi
+  rm -rf "${DATA_DIR}"
+  log "reset complete (container and ${DATA_DIR} removed; image kept for reuse)"
+}
+
+cmd_stop() {
+  need_docker
+  if container_running; then
+    docker stop --time 15 "${CONTAINER_NAME}" >/dev/null
+    log "stopped ${CONTAINER_NAME} (data preserved in ${DATA_DIR})"
+  else
+    log "container ${CONTAINER_NAME} is not running"
+  fi
+}
+
+cmd_logs() {
+  need_docker
+  local tail_lines="${TAIL:-200}"
+  local follow=""
+  for arg in "$@"; do
+    case "${arg}" in
+      --follow|-f) follow="-f" ;;
+      *) tail_lines="${arg}" ;;
+    esac
+  done
+  docker logs --tail "${tail_lines}" ${follow} "${CONTAINER_NAME}" 2>&1 || die "no logs for ${CONTAINER_NAME}"
+}
+
+cmd_status() {
+  echo "App: Music Assistant"
+  echo "Image: ${IMAGE_NAME}"
+  echo "Port: ${PORT}"
+  echo "URL: ${LOCAL_URL}/"
+  echo "Base URL: ${BASE_URL}"
+  echo "Container: ${CONTAINER_NAME}"
+  echo "Data dir: ${DATA_DIR}"
+  if container_running; then
+    echo "Status: RUNNING"
+    echo "Credentials: ${ADMIN_USER}/${ADMIN_PASS} (admin)"
+  elif container_exists; then
+    echo "Status: STOPPED"
+  else
+    echo "Status: NOT RUNNING"
+  fi
+}
+
+cmd_help() {
+  cat <<EOF
+music-assistant - Tester Environment CLI
+
+Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+
+Commands:
+  deploy    Build the source image, start the container, create admin and finish onboarding
+  seed      Add the deterministic baseline data (music provider, listener account, playlists, favorites)
+  verify    Assert the seeded baseline over the API (counts, names, playlists, favorites, users)
+  reset     Stop and remove the container and the bind-mounted data dir (keeps the image)
+  stop      Stop the container (data preserved)
+  logs      Show container logs (TAIL=<n>, --follow)
+  status    Show container/image/URL/credential state
+  help      Show this help
+
+Options:
+  --run-id <id>   Scope container and data dir names for parallel runs. Default: default
+  --port <port>   Host port bound to container 8095. Default: 8095
+
+Environment:
+  IMAGE_TAG       Content-addressed image tag exported by scripts/rl-env
+                  (default: tester-env-music-assistant:dev)
+  RUN_ID          Run id; scopes container + data dir, never the image name
+  PORT            Host port (same as --port)
+  DATA_DIR        Override the bind-mount dir (default .tester-env-data<run-id suffix>)
+  BASE_URL        Webserver base_url written by deploy (default TESTER_ENV_BROWSER_ORIGIN
+                  or http://127.0.0.1:<port>)
+  MASS_ADMIN_USER / MASS_ADMIN_PASS   First admin created by deploy (admin/admin12345)
+
+Volumes and credentials:
+  /data     settings.json, library.db, auth DB, cache, logs -> ${DATA_DIR}
+  account:  ${ADMIN_USER}/${ADMIN_PASS} (ADMIN role, onboarding already completed)
+
+Caveats:
+  - deploy leaves the library empty (no music provider is configured). ./tester-env
+    seed adds the upstream non-builtin 'test' provider through the setup flow, which
+    syncs 5 artists / 25 albums / 500 tracks / 5 podcasts / 5 audiobooks
+    deterministically, then creates the listener account, playlists and favorites.
+  - The first-run setup endpoint only accepts the first admin within 15 minutes
+    of boot; deploy always recreates the container, so a fresh window is opened.
+  - Builtin metadata/loudness providers and mDNS device discovery stay active
+    and may log network errors in a sandbox; do not assert on task/discovery state.
+  - The UI bundle is the pinned music-assistant-frontend 2.17.297.post4 wheel
+    from requirements_all.txt (separate repo); server-side edits are live, UI
+    bundle edits need the frontend repo.
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  # Pull --run-id/--port out of the remaining arguments; keep the rest for logs.
+  local passthrough=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run-id)
+        [ $# -ge 2 ] || die "--run-id requires a value"
+        RUN_ID="$2"
+        shift 2
+        ;;
+      --port)
+        [ $# -ge 2 ] || die "--port requires a value"
+        PORT="$2"
+        shift 2
+        ;;
+      --help|-h)
+        cmd_help
+        exit 0
+        ;;
+      *)
+        passthrough+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  SUFFIX=""
+  [ "${RUN_ID}" != "default" ] && SUFFIX="-${RUN_ID}"
+  CONTAINER_NAME="tester-env-music-assistant${SUFFIX}"
+  DATA_DIR="${DATA_DIR_OVERRIDE:-${SCRIPT_DIR}/.tester-env-data${SUFFIX}}"
+  LOCAL_URL="http://127.0.0.1:${PORT}"
+  BASE_URL="${BASE_URL_ENV:-${TESTER_ENV_BROWSER_ORIGIN:-${LOCAL_URL}}}"
+  refresh_labels
+
+  case "${cmd}" in
+    deploy) cmd_deploy ;;
+    seed) cmd_seed ;;
+    verify) cmd_verify ;;
+    reset) cmd_reset ;;
+    stop) cmd_stop ;;
+    logs) cmd_logs ${passthrough[@]+"${passthrough[@]}"} ;;
+    status) cmd_status ;;
+    help|--help|-h) cmd_help ;;
+    *) die "unknown command: ${cmd} (run './tester-env help')" ;;
+  esac
+}
+
+main "$@"
