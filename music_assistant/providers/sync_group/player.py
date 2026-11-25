@@ -1674,7 +1674,9 @@ class SyncGroupPlayer(PlayerProtocol):
             if member_id == new_leader.player_id:
                 continue
             if member := self.mass.players.get_player(member_id):
-                if target := self._resolve_session_target(member, session_domain):
+                target = self._resolve_session_target(member, session_domain)
+                # one that lost its stream is left to its own return
+                if target and not target.rejoins_group(self._group_player.player_id):
                     remaining_protocol_ids.append(target.protocol_id)
 
         # 1. Old leader's session protocol steps out of the session.
@@ -1860,6 +1862,8 @@ class SyncGroupPlayer(PlayerProtocol):
         """
         grouped = set(leader.group_members)
         group_player_id = self._group_player.player_id
+        session = self._active_session_protocol()
+        domain = session.provider.domain if session else None
         return [
             member_id
             for member_id in self._attr_static_group_members
@@ -1879,6 +1883,11 @@ class SyncGroupPlayer(PlayerProtocol):
                 member.playback_state == PlaybackState.PLAYING
                 and member.synced_to is None
                 and member.active_group is None
+            )
+            # its protocol in the session can bring it back by itself
+            and not (
+                (target := self._resolve_session_target(member, domain))
+                and target.rejoins_group(group_player_id)
             )
         ]
 
